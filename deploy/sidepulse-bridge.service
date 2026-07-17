@@ -1,0 +1,22 @@
+[Unit]
+Description=SidePulse Bridge (bridge.sidepulse.io)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sidepulse
+Group=sidepulse
+ExecStart=/opt/sidepulse-bridge/sidepulse-bridge
+EnvironmentFile=-/etc/sidepulse-bridge/env
+# Allow binding to port 443 without root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/letsencrypt /etc/sidepulse-bridge
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

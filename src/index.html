@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SidePulse Bridge</title>
+<style>
+  body{font:16px/1.6 -apple-system,system-ui,sans-serif;background:#0d1117;color:#e6edf3;
+    display:grid;place-items:center;min-height:100vh;margin:0;padding:1.5rem;box-sizing:border-box}
+  main{max-width:560px}
+  h1{font-size:1.4rem}
+  a{color:#58a6ff;text-decoration:none}
+  code{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.1rem .4rem;font-size:.85em}
+  p.api{color:#8b949e;font-size:.9rem}
+  footer{position:fixed;bottom:.6rem;left:0;right:0;text-align:center;color:#484f58;font-size:.7rem}
+</style>
+<main>
+  <h1>SidePulse Bridge</h1>
+  <p>This is a bridge service to update <a href="https://sidepulse.io">SidePulse</a>
+  devices over the network. Server&nbsp;&rarr;&nbsp;Mac, Mac&nbsp;&rarr;&nbsp;Mac,
+  Mac&nbsp;&rarr;&nbsp;iPhone (SidePulse&nbsp;Dot).</p>
+  <p class="api">
+    Listen: <code>GET /api/leds/{uuid}</code> (SSE) &nbsp;&middot;&nbsp;
+    Send: <code>POST /api/leds/{uuid}</code> &nbsp;&middot;&nbsp;
+    Push: <code>POST /api/leds/apns_{token}</code>
+  </p>
+</main>
+<footer>&copy; 2026 InteliWEAR LLC</footer>

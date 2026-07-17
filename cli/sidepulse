@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# sidepulse — tiny CLI for the SidePulse Bridge (curl-based, no build needed)
+set -euo pipefail
+
+SERVER="${SIDEPULSE_SERVER:-https://bridge.sidepulse.io}"
+
+usage() {
+  cat >&2 <<EOF
+usage: sidepulse <command> [args]
+
+commands:
+  gen                                generate a new random channel UUID
+  listen <uuid>                      print messages as they arrive (SSE)
+  send <uuid> [text]                 send text (reads stdin if omitted)
+                                     -> prints OK or OK QUEUED
+  notify <apns-token> <title> <text> [leds]
+                                     send an Apple push notification
+
+environment:
+  SIDEPULSE_SERVER   server base URL (default: https://bridge.sidepulse.io)
+
+examples:
+  id=\$(sidepulse gen)
+  sidepulse listen "\$id" &
+  sidepulse send "\$id" "hello world"
+  echo "from stdin" | sidepulse send "\$id"
+  sidepulse notify 0a1b2c... "Title" "Body text" "LED TEXT"
+EOF
+  exit 1
+}
+
+json_escape() {
+  # escape backslash, double quote, and control chars for JSON strings
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+    -e 's/\t/\\t/g' | awk '{printf "%s\\n", $0}' | sed -e 's/\\n$//'
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] && shift || usage
+
+case "$cmd" in
+  gen)
+    uuidgen | tr '[:upper:]' '[:lower:]'
+    ;;
+  listen)
+    [ $# -ge 1 ] || usage
+    curl -sN --fail "$SERVER/api/leds/$1" | while IFS= read -r line; do
+      case "$line" in
+        "data: "*) printf '%s\n' "${line#data: }" ;;
+      esac
+    done
+    ;;
+  send)
+    [ $# -ge 1 ] || usage
+    uuid="$1"; shift
+    if [ $# -gt 0 ]; then data="$*"; else data=$(cat); fi
+    curl -s --fail-with-body -X POST --data-binary "$data" "$SERVER/api/leds/$uuid"
+    echo
+    ;;
+  notify)
+    [ $# -ge 3 ] || usage
+    token="$1" title="$2" text="$3" leds="${4:-$3}"
+    body=$(printf '{"leds":"%s","title":"%s","text":"%s"}' \
+      "$(json_escape "$leds")" "$(json_escape "$title")" "$(json_escape "$text")")
+    curl -s --fail-with-body -X POST -d "$body" "$SERVER/api/leds/apns_$token"
+    echo
+    ;;
+  *)
+    usage
+    ;;
+esac

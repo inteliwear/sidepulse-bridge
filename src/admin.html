@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SidePulse Bridge — stats</title>
+<style>
+  body{font:14px/1.5 -apple-system,system-ui,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:1.5rem;max-width:960px;margin-inline:auto}
+  h1{font-size:1.1rem;font-weight:600}
+  .cards{display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:.8rem 1.2rem;min-width:8rem}
+  .card b{display:block;font-size:1.6rem}
+  .card span{color:#8b949e;font-size:.8rem}
+  canvas{width:100%;height:220px;background:#161b22;border:1px solid #30363d;border-radius:8px}
+  .legend{color:#8b949e;font-size:.8rem;margin:.3rem 0 1rem}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 .3rem 0 1rem}
+  table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}
+  th,td{text-align:left;padding:.25rem .6rem;border-bottom:1px solid #21262d;font-variant-numeric:tabular-nums}
+  th{color:#8b949e;font-weight:500;font-size:.8rem}
+  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:0 2rem}
+  select{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:.2rem}
+</style>
+<h1>SidePulse Bridge</h1>
+<div class="cards">
+  <div class="card"><b id="sse">–</b><span>SSE listeners now</span></div>
+  <div class="card"><b id="posts">–</b><span>posts (since start)</span></div>
+  <div class="card"><b id="pushes">–</b><span>pushes (since start)</span></div>
+  <div class="card"><b id="uips">–</b><span>unique IPs today</span></div>
+  <div class="card"><b id="uch">–</b><span>unique channels today</span></div>
+  <div class="card"><b id="utk">–</b><span>unique push tokens today</span></div>
+</div>
+<canvas id="graph" width="1840" height="440"></canvas>
+<div class="legend">per minute, last <select id="range"><option value="60">1 h</option><option value="180" selected>3 h</option><option value="1440">24 h</option></select>
+  <i style="background:#3fb950"></i>posts <i style="background:#d29922"></i>pushes <i style="background:#58a6ff"></i>SSE connects
+</div>
+<div class="cols">
+  <div><h1>Per IP today (top 10, anonymous)</h1><table id="tips"><tr><th>#</th><th>posts</th><th>pushes</th><th>connects</th></tr></table></div>
+  <div><h1>Per channel today (top 10, anonymous)</h1><table id="tch"><tr><th>#</th><th>posts</th></tr></table></div>
+  <div><h1>Per push token today (top 10, anonymous)</h1><table id="ttk"><tr><th>#</th><th>pushes</th></tr></table></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let data=null;
+function draw(){
+  if(!data)return;
+  const n=+$('range').value,c=$('graph'),x=c.getContext('2d');
+  const s=['posts','pushes','connects'].map(k=>data.minutes[k].slice(-n));
+  const max=Math.max(1,...s.flat()),W=c.width,H=c.height,pad=30;
+  x.clearRect(0,0,W,H);
+  x.strokeStyle='#21262d';x.fillStyle='#8b949e';x.font='20px sans-serif';
+  for(let g=0;g<=4;g++){const y=pad+(H-2*pad)*g/4;
+    x.beginPath();x.moveTo(0,y);x.lineTo(W,y);x.stroke();
+    x.fillText(Math.round(max*(4-g)/4),4,y-4);}
+  ['#3fb950','#d29922','#58a6ff'].forEach((col,i)=>{
+    x.strokeStyle=col;x.lineWidth=2.5;x.beginPath();
+    s[i].forEach((v,j)=>{const px=j/(n-1)*W,py=H-pad-(H-2*pad)*v/max;
+      j?x.lineTo(px,py):x.moveTo(px,py);});
+    x.stroke();});
+}
+function rows(t,list,cols){
+  t.querySelectorAll('tr:not(:first-child)').forEach(r=>r.remove());
+  list.forEach((o,i)=>{const tr=document.createElement('tr');
+    [i+1,...cols.map(k=>o[k])].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.appendChild(td);});
+    t.appendChild(tr);});
+}
+async function tick(){
+  try{
+    data=await (await fetch('/admin/stats.json')).json();
+    $('sse').textContent=data.sse_active;
+    $('posts').textContent=data.totals.posts;
+    $('pushes').textContent=data.totals.pushes;
+    $('uips').textContent=data.today.unique_ips;
+    $('uch').textContent=data.today.unique_channels;
+    $('utk').textContent=data.today.unique_push_tokens;
+    rows($('tips'),data.top_ips,['posts','pushes','connects']);
+    rows($('tch'),data.top_channels,['posts']);
+    rows($('ttk'),data.top_tokens,['pushes']);
+    draw();
+  }catch(e){}
+}
+$('range').onchange=draw;
+tick();setInterval(tick,5000);
+</script>
