@@ -238,3 +238,7 @@ curl -d 'hi' localhost:8080/api/leds/test-uuid
   inactivity are swept every 60 s, so random UUIDs don't accumulate.
 - **TLS**: rustls in-process (no reverse proxy needed); HTTP/2 and HTTP/1.1
   via ALPN.
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE). © 2026 InteliWEAR LLC.
