@@ -4,11 +4,18 @@ High-performance message-passing bridge over HTTPS + Server-Sent Events (SSE),
 with optional Apple Push Notification (APNs) delivery. Written in Rust
 (axum + tokio), designed to run on `https://bridge.sidepulse.io`.
 
+This bridge is part of the [SidePulse](https://sidepulse.io) project.
+
 One side **listens** on a randomly generated UUID channel via SSE; the other
 side **posts** plain-text messages to the same UUID. If no listener is
 connected, up to **5 messages** are queued per channel (oldest dropped when
 full) for at most **5 minutes** — the queue covers dropped-connection
 recovery, not offline storage.
+
+> **The channel UUID is the only access control.** There are no accounts,
+> keys, or ACLs: anyone who knows a channel's UUID can both read every
+> message on it and post to it. Treat the UUID as a shared secret — generate
+> it randomly, pass it over a private path, and rotate it if it leaks.
 
 Full machine-readable API spec (for building clients in any language):
 **[API.md](API.md)**.
