@@ -76,11 +76,12 @@ either plain text, or JSON:
 - `pattern`, `data` — optional custom keys passed through in the payload.
 - All fields optional. Plain-text body ≡ `{"leds": "<body>"}`.
 
-Delivery mode: if `title`, `text`, or `alert` is set, the push is a visible
-notification (push-type `alert`, priority 10, default sound). Otherwise it is
-a **silent background push** (`aps: {"content-available": 1}`, push-type
-`background`, priority 5) carrying just the custom keys — the normal mode for
-LED updates.
+Delivery mode: every push includes `content-available: 1` so iOS can wake the
+app to process custom data. If `title`, `text`, or `alert` is set, the push is
+also a visible notification (push-type `alert`, priority 10, default sound).
+Otherwise it is a **silent background push** (push-type `background`, priority
+5) carrying just the custom keys — the normal mode for LED updates. Background
+execution is scheduled by iOS and is not guaranteed.
 
 Responses:
 
@@ -90,12 +91,33 @@ Responses:
 | `502`  | `APNS ERROR: <reason>`  | APNs rejected it (bad token, etc.).  |
 | `503`  | `APNS NOT CONFIGURED`   | Server has no APNs credentials.      |
 
+Every APNs post is also retained in a short recovery queue, whether APNs
+accepts or rejects the delivery. The queue keeps the latest 5 messages for up
+to 5 minutes.
+
 ```sh
 curl -X POST -d '{"leds":"HELLO","title":"SidePulse","text":"New message"}' \
   https://bridge.sidepulse.io/api/leds/apns_a1b2c3d4e5f6...
 ```
 
-### 4. Health — `GET /healthz`
+### 4. Recover queued pushes — `GET /api/leds/apns_{device_token}/queued`
+
+Returns and drains the recovery queue for that token as a FIFO JSON array.
+JSON request bodies are returned as objects; plain-text bodies are returned as
+strings. A second GET returns an empty array unless new pushes have arrived.
+
+```json
+[
+  {"leds":"HELLO","title":"SidePulse","text":"New message"},
+  "plain LED text"
+]
+```
+
+```sh
+curl https://bridge.sidepulse.io/api/leds/apns_a1b2c3d4e5f6.../queued
+```
+
+### 5. Health — `GET /healthz`
 
 Returns `200 OK` with body `OK`. Not rate-limited.
 

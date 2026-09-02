@@ -79,8 +79,19 @@ The body is either plain TXT, or JSON:
 - `title` / `text` — the notification alert title and body. With a plain TXT
   body, the text is used as both `leds` and the alert body.
 
+All pushes include `content-available: 1`, so a visible notification can also
+wake the app to process its custom data. Background execution remains subject
+to iOS scheduling and is not guaranteed.
+
 Responds `OK` on success, `502` with the APNs error otherwise, and
 `503 APNS NOT CONFIGURED` if the server has no APNs credentials.
+
+Every push attempt is also kept in a per-token recovery queue (latest 5, up
+to 5 minutes). Fetching the queue drains it:
+
+```sh
+curl https://bridge.sidepulse.io/api/leds/apns_<device-token>/queued
+```
 
 ```sh
 curl -d '{"leds":"HELLO","title":"SidePulse","text":"New message"}' \
@@ -182,7 +193,7 @@ curl -d 'hi' localhost:8080/api/leds/test-uuid
    APNS_KEY_PATH=/etc/sidepulse-bridge/AuthKey_XXXXXXXXXX.p8
    APNS_KEY_ID=XXXXXXXXXX
    APNS_TEAM_ID=YYYYYYYYYY
-   APNS_TOPIC=io.sidepulse.app
+   APNS_TOPIC=io.sidepulse.ios
    EOF
    sudo chmod 600 /etc/sidepulse-bridge/env /etc/sidepulse-bridge/*.p8
    sudo chown -R sidepulse:sidepulse /etc/sidepulse-bridge

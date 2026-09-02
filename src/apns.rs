@@ -57,6 +57,70 @@ pub struct Apns {
     topic: String,
 }
 
+fn build_payload<'a>(
+    token: &'a str,
+    msg: &'a ApnsMessage,
+    topic: &'a str,
+) -> Result<a2::request::payload::Payload<'a>, String> {
+    let alert_body = if !msg.text.is_empty() {
+        &msg.text
+    } else {
+        &msg.alert
+    };
+    let is_alert = !alert_body.is_empty() || !msg.title.is_empty();
+
+    // Include the background-update flag on every notification. Alert
+    // pushes still use the alert push type and high priority, but iOS can
+    // also wake the app to process the custom LED data.
+    let mut builder = DefaultNotificationBuilder::new().set_content_available();
+    if is_alert {
+        let title = if msg.title.is_empty() {
+            "SidePulse"
+        } else {
+            &msg.title
+        };
+        builder = builder.set_title(title).set_sound("default");
+        if !alert_body.is_empty() {
+            builder = builder.set_body(alert_body);
+        }
+    }
+
+    let options = NotificationOptions {
+        apns_topic: Some(topic),
+        apns_push_type: Some(if is_alert {
+            PushType::Alert
+        } else {
+            PushType::Background
+        }),
+        apns_priority: Some(if is_alert {
+            Priority::High
+        } else {
+            Priority::Normal
+        }),
+        ..Default::default()
+    };
+
+    let mut payload = builder.build(token, options);
+    let led_text = msg.led_text();
+    if !led_text.is_empty() {
+        payload
+            .add_custom_data("leds", &led_text)
+            .map_err(|e| e.to_string())?;
+    }
+    if !msg.pattern.is_empty() {
+        payload
+            .add_custom_data("pattern", &msg.pattern)
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(data) = &msg.data {
+        payload
+            .add_custom_data("data", data)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(payload)
+}
+
 fn env_any(names: &[&str]) -> Option<String> {
     names.iter().find_map(|n| std::env::var(n).ok())
 }
@@ -90,61 +154,7 @@ impl Apns {
     }
 
     pub async fn send(&self, token: &str, msg: &ApnsMessage) -> Result<(), String> {
-        let alert_body = if !msg.text.is_empty() {
-            &msg.text
-        } else {
-            &msg.alert
-        };
-        let is_alert = !alert_body.is_empty() || !msg.title.is_empty();
-
-        let mut builder = DefaultNotificationBuilder::new();
-        if is_alert {
-            let title = if msg.title.is_empty() {
-                "SidePulse"
-            } else {
-                &msg.title
-            };
-            builder = builder.set_title(title).set_sound("default");
-            if !alert_body.is_empty() {
-                builder = builder.set_body(alert_body);
-            }
-        } else {
-            builder = builder.set_content_available();
-        }
-
-        let options = NotificationOptions {
-            apns_topic: Some(&self.topic),
-            apns_push_type: Some(if is_alert {
-                PushType::Alert
-            } else {
-                PushType::Background
-            }),
-            apns_priority: Some(if is_alert {
-                Priority::High
-            } else {
-                Priority::Normal
-            }),
-            ..Default::default()
-        };
-
-        let mut payload = builder.build(token, options);
-        let led_text = msg.led_text();
-        if !led_text.is_empty() {
-            payload
-                .add_custom_data("leds", &led_text)
-                .map_err(|e| e.to_string())?;
-        }
-        if !msg.pattern.is_empty() {
-            payload
-                .add_custom_data("pattern", &msg.pattern)
-                .map_err(|e| e.to_string())?;
-        }
-        if let Some(data) = &msg.data {
-            payload
-                .add_custom_data("data", data)
-                .map_err(|e| e.to_string())?;
-        }
-
+        let payload = build_payload(token, msg, &self.topic)?;
         let response = self.client.send(payload).await.map_err(|e| e.to_string())?;
         if response.code == 200 {
             Ok(())
@@ -155,5 +165,43 @@ impl Apns {
                 response.error.map(|e| e.reason)
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_notification_also_requests_background_delivery() {
+        let msg = ApnsMessage {
+            leds: "LED TEXT".into(),
+            title: "Title".into(),
+            text: "Message".into(),
+            ..Default::default()
+        };
+
+        let payload = build_payload("token", &msg, "io.sidepulse.ios").unwrap();
+        let json = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(json["aps"]["content-available"], 1);
+        assert_eq!(json["aps"]["alert"]["title"], "Title");
+        assert_eq!(json["aps"]["alert"]["body"], "Message");
+        assert_eq!(json["leds"], "LED TEXT");
+    }
+
+    #[test]
+    fn silent_notification_keeps_background_delivery() {
+        let msg = ApnsMessage {
+            leds: "LED TEXT".into(),
+            ..Default::default()
+        };
+
+        let payload = build_payload("token", &msg, "io.sidepulse.ios").unwrap();
+        let json = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(json["aps"]["content-available"], 1);
+        assert!(json["aps"].get("alert").is_none());
+        assert_eq!(json["leds"], "LED TEXT");
     }
 }

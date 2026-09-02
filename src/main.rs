@@ -12,13 +12,14 @@ use std::{
 
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
     routing::get,
+    Json,
     Router,
 };
 use dashmap::DashMap;
@@ -65,6 +66,25 @@ impl Channel {
 
     fn touch(&self) {
         *self.touched.lock().unwrap() = Instant::now();
+    }
+
+    fn enqueue(&self, msg: String) {
+        let mut queue = self.queue.lock().unwrap();
+        queue.retain(|(queued_at, _)| queued_at.elapsed() < msg_ttl());
+        if queue.len() >= MAX_QUEUE {
+            queue.pop_front();
+        }
+        queue.push_back((Instant::now(), msg));
+    }
+
+    fn drain_queue(&self) -> Vec<String> {
+        self.queue
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter(|(queued_at, _)| queued_at.elapsed() < msg_ttl())
+            .map(|(_, msg)| msg)
+            .collect()
     }
 }
 
@@ -140,6 +160,10 @@ async fn post_message(
     }
     if let Some(token) = id.strip_prefix("apns_") {
         state.stats.record_push(addr.ip(), token);
+        // Keep a short recovery copy independently of APNs delivery. A client
+        // can drain it later from the token's `/queued` endpoint if the push
+        // is delayed or lost.
+        state.channel(&id).enqueue(body.clone());
         let apns = state.apns.as_ref().ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "APNS NOT CONFIGURED".to_string(),
@@ -168,6 +192,40 @@ async fn post_message(
             Ok("OK QUEUED")
         }
     }
+}
+
+fn queued_json_value(body: String) -> serde_json::Value {
+    match serde_json::from_str(&body) {
+        Ok(value @ serde_json::Value::Object(_)) => value,
+        _ => serde_json::Value::String(body),
+    }
+}
+
+async fn get_queued(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Response, StatusCode> {
+    if id.len() > MAX_ID_LEN {
+        return Err(StatusCode::URI_TOO_LONG);
+    }
+    if !id.starts_with("apns_") {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let messages: Vec<serde_json::Value> = state
+        .channels
+        .get(&id)
+        .map(|entry| {
+            entry.touch();
+            entry
+                .drain_queue()
+                .into_iter()
+                .map(queued_json_value)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(messages)).into_response())
 }
 
 /// Compares without early exit; runtime depends only on max(len), not on
@@ -386,6 +444,7 @@ async fn main() {
             get(|| async { axum::response::Html(include_str!("index.html")) }),
         )
         .route("/api/leds/{id}", get(listen).post(post_message))
+        .route("/api/leds/{id}/queued", get(get_queued))
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .route("/healthz", get(|| async { "OK" }))
         .route("/admin", get(admin_page))
@@ -443,5 +502,42 @@ async fn main() {
         )
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_queue_keeps_the_latest_five_in_fifo_order() {
+        let channel = Channel::new();
+        for n in 1..=6 {
+            channel.enqueue(format!("message-{n}"));
+        }
+
+        assert_eq!(
+            channel.drain_queue(),
+            vec![
+                "message-2",
+                "message-3",
+                "message-4",
+                "message-5",
+                "message-6"
+            ]
+        );
+        assert!(channel.drain_queue().is_empty());
+    }
+
+    #[test]
+    fn recovery_queue_returns_json_objects_and_plain_text() {
+        assert_eq!(
+            queued_json_value(r#"{"title":"Title","text":"Message"}"#.into()),
+            serde_json::json!({"title": "Title", "text": "Message"})
+        );
+        assert_eq!(
+            queued_json_value("plain text".into()),
+            serde_json::json!("plain text")
+        );
     }
 }
