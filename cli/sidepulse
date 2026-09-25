@@ -15,6 +15,7 @@ commands:
                                      -> prints OK or OK QUEUED
   notify <apns-token> <title> <text> [leds]
                                      send an Apple push notification
+                                     prefix token with dev_ for sandbox APNs
 
 environment:
   SIDEPULSE_SERVER   server base URL (default: https://bridge.sidepulse.io)

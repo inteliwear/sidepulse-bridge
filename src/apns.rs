@@ -53,8 +53,17 @@ impl ApnsMessage {
 }
 
 pub struct Apns {
-    client: Client,
+    production: Client,
+    sandbox: Client,
     topic: String,
+}
+
+/// The prefix belongs to the bridge protocol, never to the APNs device token.
+fn route_token(token: &str) -> (Endpoint, &str) {
+    match token.strip_prefix("dev_") {
+        Some(token) => (Endpoint::Sandbox, token),
+        None => (Endpoint::Production, token),
+    }
 }
 
 fn build_payload<'a>(
@@ -135,27 +144,39 @@ impl Apns {
         let key_id = std::env::var("APNS_KEY_ID").map_err(|_| "APNS_KEY_ID not set")?;
         let team_id = std::env::var("APNS_TEAM_ID").map_err(|_| "APNS_TEAM_ID not set")?;
         let topic = env_any(&["APNS_TOPIC", "APNS_BUNDLE_ID"]).ok_or("APNS_TOPIC not set")?;
-        let sandbox = matches!(
-            std::env::var("APNS_SANDBOX").as_deref(),
-            Ok("1") | Ok("true")
-        ) || std::env::var("APNS_ENV").as_deref() == Ok("sandbox");
-        let endpoint = if sandbox {
-            Endpoint::Sandbox
-        } else {
-            Endpoint::Production
+        if std::env::var_os("APNS_SANDBOX").is_some() || std::env::var_os("APNS_ENV").is_some() {
+            tracing::warn!("APNS_SANDBOX/APNS_ENV are ignored; dev_ tokens use sandbox, unprefixed tokens use production");
+        }
+
+        let key = std::fs::read(&key_path)
+            .map_err(|e| format!("cannot read APNS key {key_path}: {e}"))?;
+        let make_client = |endpoint| {
+            Client::token(
+                key.as_slice(),
+                &key_id,
+                &team_id,
+                ClientConfig::new(endpoint),
+            )
+            .map_err(|e| format!("APNS client init failed: {e}"))
         };
+        let production = make_client(Endpoint::Production)?;
+        let sandbox = make_client(Endpoint::Sandbox)?;
 
-        let mut key = std::fs::File::open(&key_path)
-            .map_err(|e| format!("cannot open APNS key {key_path}: {e}"))?;
-        let client = Client::token(&mut key, &key_id, &team_id, ClientConfig::new(endpoint))
-            .map_err(|e| format!("APNS client init failed: {e}"))?;
-
-        Ok(Some(Self { client, topic }))
+        Ok(Some(Self {
+            production,
+            sandbox,
+            topic,
+        }))
     }
 
     pub async fn send(&self, token: &str, msg: &ApnsMessage) -> Result<(), String> {
+        let (endpoint, token) = route_token(token);
+        let client = match endpoint {
+            Endpoint::Production => &self.production,
+            Endpoint::Sandbox => &self.sandbox,
+        };
         let payload = build_payload(token, msg, &self.topic)?;
-        let response = self.client.send(payload).await.map_err(|e| e.to_string())?;
+        let response = client.send(payload).await.map_err(|e| e.to_string())?;
         if response.code == 200 {
             Ok(())
         } else {
@@ -171,6 +192,27 @@ impl Apns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn development_prefix_selects_sandbox_and_is_removed_from_apns_payload() {
+        let raw_token = "ab".repeat(32);
+        let prefixed_token = format!("dev_{raw_token}");
+        let (endpoint, token) = route_token(&prefixed_token);
+        assert!(matches!(endpoint, Endpoint::Sandbox));
+        let msg = ApnsMessage::parse("HELLO");
+        let payload = build_payload(token, &msg, "io.sidepulse.ios").unwrap();
+        assert_eq!(payload.device_token, raw_token);
+    }
+
+    #[test]
+    fn unprefixed_token_selects_production_and_is_preserved() {
+        let raw_token = "ab".repeat(32);
+        let (endpoint, token) = route_token(&raw_token);
+        assert!(matches!(endpoint, Endpoint::Production));
+        let msg = ApnsMessage::parse("HELLO");
+        let payload = build_payload(token, &msg, "io.sidepulse.ios").unwrap();
+        assert_eq!(payload.device_token, raw_token);
+    }
 
     #[test]
     fn visible_notification_also_requests_background_delivery() {

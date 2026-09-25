@@ -61,8 +61,15 @@ curl -X POST -d 'hello world' https://bridge.sidepulse.io/api/leds/6f1c2a9e-8f4b
 
 ### 3. Push notification — `POST /api/leds/apns_{device_token}`
 
-`{device_token}` is the hex APNs device token from the iOS app. Body is
-either plain text, or JSON:
+`{device_token}` is the hex APNs device token from the iOS app, optionally
+prefixed with `dev_`:
+
+- `apns_{hex_token}` routes to production APNs (TestFlight / App Store).
+- `apns_dev_{hex_token}` routes to sandbox APNs (development builds). The
+  bridge removes `dev_` before passing the device token to Apple.
+
+Routing is per token; the legacy `APNS_SANDBOX` / `APNS_ENV` server settings
+are ignored. Body is either plain text, or JSON:
 
 ```json
 {"leds": "LED TEXT", "title": "Alert title", "text": "Alert body",
@@ -103,6 +110,8 @@ curl -X POST -d '{"leds":"HELLO","title":"SidePulse","text":"New message"}' \
 ### 4. Recover queued pushes — `GET /api/leds/apns_{device_token}/queued`
 
 Returns and drains the recovery queue for that token as a FIFO JSON array.
+Use the same token including any `dev_` prefix as in the POST URL; production
+and development queues are separate even if their hex tokens match.
 JSON request bodies are returned as objects; plain-text bodies are returned as
 strings. A second GET returns an empty array unless new pushes have arrived.
 

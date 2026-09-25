@@ -509,6 +509,51 @@ async fn main() {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn production_and_development_recovery_queues_are_isolated() {
+        let token = "ab".repeat(32);
+        let production = format!("apns_{token}");
+        let development = format!("apns_dev_{token}");
+
+        // Exercise both drain orders through the POST and recovery handlers.
+        for ids in [[&production, &development], [&development, &production]] {
+            let state = Arc::new(AppState {
+                channels: DashMap::new(),
+                apns: None,
+                limiter: ratelimit::RateLimiter::from_env(),
+                stats: Arc::new(stats::Stats::new()),
+                admin_password: None,
+            });
+            for id in ids {
+                let result = post_message(
+                    Path(id.clone()),
+                    ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                    State(state.clone()),
+                    serde_json::json!({"leds": id}).to_string(),
+                )
+                .await;
+                // Recovery must also work when push delivery is unavailable.
+                assert_eq!(result.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+            }
+
+            for id in ids {
+                // Draining either environment twice must leave the other alone.
+                for expected in [serde_json::json!([{"leds": id}]), serde_json::json!([])] {
+                    let response = get_queued(Path(id.clone()), State(state.clone()))
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                    let body = axum::body::to_bytes(response.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
     #[test]
     fn recovery_queue_keeps_the_latest_five_in_fifo_order() {
         let channel = Channel::new();

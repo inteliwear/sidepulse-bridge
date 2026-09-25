@@ -76,6 +76,12 @@ APNs.
 POST /api/leds/apns_{device-push-token}
 ```
 
+Unprefixed tokens go to **production APNs** (TestFlight and App Store builds).
+Development builds use `dev_` followed by the token, making their channel
+`apns_dev_{device-push-token}`. The bridge strips `dev_` before sending to
+**sandbox APNs**. Both environments work on the same bridge; the `.p8` key
+must be authorized for both environments.
+
 The body is either plain TXT, or JSON:
 
 ```json
@@ -140,13 +146,17 @@ time. Tunable via `RATE_PER_SEC`, `RATE_PER_MIN`, `RATE_PER_DAY`.
 | `APNS_KEY_ID`    | —                                                          | Key ID of the `.p8` key          |
 | `APNS_TEAM_ID`   | —                                                          | Apple Developer Team ID          |
 | `APNS_TOPIC`     | —                                                          | App bundle ID (apns-topic)       |
-| `APNS_SANDBOX`   | unset (production)                                         | Set `1` to use the APNs sandbox  |
 | `ADMIN_PASSWORD` | *(unset = admin UI disabled)*                              | Password for `/admin` stats UI   |
 | `RATE_PER_SEC` / `RATE_PER_MIN` / `RATE_PER_DAY` | 100 / 1000 / 100000        | Per-IP rate limits               |
 | `RUST_LOG`       | `sidepulse_bridge=info`                                    | Log filter                       |
 
 If the TLS cert files don't exist, the server falls back to plain HTTP —
 handy for local development.
+
+`APNS_SANDBOX` and the legacy `APNS_ENV` setting are ignored. Push routing is
+determined by each token's `dev_` prefix, so server settings cannot send
+TestFlight tokens to the sandbox. Keep the prefix in recovery queue URLs too:
+`/api/leds/apns_dev_{device-push-token}/queued`.
 
 > **The APNs `.p8` key must never be committed.** It's covered by
 > `.gitignore` (`*.p8`); keep it on the server only, e.g. in
