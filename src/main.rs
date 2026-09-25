@@ -68,12 +68,9 @@ impl Channel {
         *self.touched.lock().unwrap() = Instant::now();
     }
 
-    fn enqueue(&self, msg: String) {
+    fn replace_queued_push(&self, msg: String) {
         let mut queue = self.queue.lock().unwrap();
-        queue.retain(|(queued_at, _)| queued_at.elapsed() < msg_ttl());
-        if queue.len() >= MAX_QUEUE {
-            queue.pop_front();
-        }
+        queue.clear();
         queue.push_back((Instant::now(), msg));
     }
 
@@ -160,10 +157,9 @@ async fn post_message(
     }
     if let Some(token) = id.strip_prefix("apns_") {
         state.stats.record_push(addr.ip(), token);
-        // Keep a short recovery copy independently of APNs delivery. A client
-        // can drain it later from the token's `/queued` endpoint if the push
-        // is delayed or lost.
-        state.channel(&id).enqueue(body.clone());
+        // Match APNs collapse behavior: recovery retains only the newest push,
+        // independently of whether APNs accepts or delivers it.
+        state.channel(&id).replace_queued_push(body.clone());
         let apns = state.apns.as_ref().ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "APNS NOT CONFIGURED".to_string(),
@@ -509,6 +505,16 @@ async fn main() {
 mod tests {
     use super::*;
 
+    fn test_state() -> Arc<AppState> {
+        Arc::new(AppState {
+            channels: DashMap::new(),
+            apns: None,
+            limiter: ratelimit::RateLimiter::from_env(),
+            stats: Arc::new(stats::Stats::new()),
+            admin_password: None,
+        })
+    }
+
     #[tokio::test]
     async fn production_and_development_recovery_queues_are_isolated() {
         let token = "ab".repeat(32);
@@ -517,23 +523,23 @@ mod tests {
 
         // Exercise both drain orders through the POST and recovery handlers.
         for ids in [[&production, &development], [&development, &production]] {
-            let state = Arc::new(AppState {
-                channels: DashMap::new(),
-                apns: None,
-                limiter: ratelimit::RateLimiter::from_env(),
-                stats: Arc::new(stats::Stats::new()),
-                admin_password: None,
-            });
+            let state = test_state();
             for id in ids {
-                let result = post_message(
-                    Path(id.clone()),
-                    ConnectInfo("127.0.0.1:12345".parse().unwrap()),
-                    State(state.clone()),
+                for body in [
+                    "old plain text".to_string(),
+                    serde_json::json!({"leds": "old JSON"}).to_string(),
                     serde_json::json!({"leds": id}).to_string(),
-                )
-                .await;
-                // Recovery must also work when push delivery is unavailable.
-                assert_eq!(result.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+                ] {
+                    let result = post_message(
+                        Path(id.clone()),
+                        ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                        State(state.clone()),
+                        body,
+                    )
+                    .await;
+                    // Recovery must also work when push delivery is unavailable.
+                    assert_eq!(result.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+                }
             }
 
             for id in ids {
@@ -554,13 +560,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recovery_queue_keeps_the_latest_five_in_fifo_order() {
-        let channel = Channel::new();
+    #[tokio::test]
+    async fn ordinary_channels_still_keep_the_latest_five_in_fifo_order() {
+        let state = test_state();
         for n in 1..=6 {
-            channel.enqueue(format!("message-{n}"));
+            let result = post_message(
+                Path("ordinary-channel".into()),
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                State(state.clone()),
+                format!("message-{n}"),
+            )
+            .await;
+            assert_eq!(result.unwrap(), "OK QUEUED");
         }
 
+        let channel = state.channel("ordinary-channel");
         assert_eq!(
             channel.drain_queue(),
             vec![

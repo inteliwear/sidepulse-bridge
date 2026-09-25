@@ -98,9 +98,15 @@ Responses:
 | `502`  | `APNS ERROR: <reason>`  | APNs rejected it (bad token, etc.).  |
 | `503`  | `APNS NOT CONFIGURED`   | Server has no APNs credentials.      |
 
-Every APNs post is also retained in a short recovery queue, whether APNs
-accepts or rejects the delivery. The queue keeps the latest 5 messages for up
-to 5 minutes.
+All pushes automatically use `apns-collapse-id: sidepulse-led-status`. Successive
+notifications for the same app/device merge into one notification; no additional
+request field is needed. This does not undo LED commands already processed or
+guarantee delivery order.
+
+Every APNs post replaces the previous message in its token's recovery queue,
+whether APNs accepts or rejects the delivery. The queue keeps only the latest
+message for up to 5 minutes. Ordinary SSE channels retain their five-message
+buffer.
 
 ```sh
 curl -X POST -d '{"leds":"HELLO","title":"SidePulse","text":"New message"}' \
@@ -109,7 +115,8 @@ curl -X POST -d '{"leds":"HELLO","title":"SidePulse","text":"New message"}' \
 
 ### 4. Recover queued pushes — `GET /api/leds/apns_{device_token}/queued`
 
-Returns and drains the recovery queue for that token as a FIFO JSON array.
+Returns and drains the recovery queue for that token as a JSON array containing
+zero or one messages (the latest unexpired push).
 Use the same token including any `dev_` prefix as in the POST URL; production
 and development queues are separate even if their hex tokens match.
 JSON request bodies are returned as objects; plain-text bodies are returned as
@@ -117,8 +124,7 @@ strings. A second GET returns an empty array unless new pushes have arrived.
 
 ```json
 [
-  {"leds":"HELLO","title":"SidePulse","text":"New message"},
-  "plain LED text"
+  {"leds":"HELLO","title":"SidePulse","text":"New message"}
 ]
 ```
 

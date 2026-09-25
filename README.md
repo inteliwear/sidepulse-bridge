@@ -92,6 +92,11 @@ The body is either plain TXT, or JSON:
 - `title` / `text` — the notification alert title and body. With a plain TXT
   body, the text is used as both `leds` and the alert body.
 
+All pushes use the fixed `apns-collapse-id: sidepulse-led-status`, so successive
+notifications for the same app/device merge into one notification automatically.
+No request field or client change is required. This does not undo LED commands
+already processed or guarantee delivery order.
+
 All pushes include `content-available: 1`, so a visible notification can also
 wake the app to process its custom data. Background execution remains subject
 to iOS scheduling and is not guaranteed.
@@ -99,8 +104,9 @@ to iOS scheduling and is not guaranteed.
 Responds `OK` on success, `502` with the APNs error otherwise, and
 `503 APNS NOT CONFIGURED` if the server has no APNs credentials.
 
-Every push attempt is also kept in a per-token recovery queue (latest 5, up
-to 5 minutes). Fetching the queue drains it:
+Each push attempt replaces the previous message in its token's recovery queue,
+whether APNs accepts it or not. Only the latest message is retained, for up to
+5 minutes. Fetching returns an array of zero or one messages and drains it:
 
 ```sh
 curl https://bridge.sidepulse.io/api/leds/apns_<device-token>/queued

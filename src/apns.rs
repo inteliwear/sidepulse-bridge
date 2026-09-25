@@ -1,8 +1,12 @@
 use a2::{
-    Client, ClientConfig, DefaultNotificationBuilder, Endpoint, NotificationBuilder,
+    Client, ClientConfig, CollapseId, DefaultNotificationBuilder, Endpoint, NotificationBuilder,
     NotificationOptions, Priority, PushType,
 };
 use serde::Deserialize;
+
+// APNs scopes this identifier to the destination app/device. All SidePulse
+// updates replace the previous notification without any client-side option.
+const COLLAPSE_ID: &str = "sidepulse-led-status";
 
 /// Message posted to an `apns_<token>` channel. Either raw TXT (treated as
 /// LED text, delivered as a silent background push), or JSON:
@@ -96,6 +100,7 @@ fn build_payload<'a>(
 
     let options = NotificationOptions {
         apns_topic: Some(topic),
+        apns_collapse_id: Some(CollapseId::new(COLLAPSE_ID).map_err(|e| e.to_string())?),
         apns_push_type: Some(if is_alert {
             PushType::Alert
         } else {
@@ -192,6 +197,28 @@ impl Apns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_push_formats_use_the_same_default_collapse_identifier() {
+        for body in [
+            "plain LED text",
+            r#"{"leds":"SILENT"}"#,
+            r#"{"leds":"ALERT","title":"Title","text":"Message"}"#,
+        ] {
+            let msg = ApnsMessage::parse(body);
+            for bridge_token in ["token", "dev_token"] {
+                let (_, token) = route_token(bridge_token);
+                let payload = build_payload(token, &msg, "io.sidepulse.ios").unwrap();
+                assert_eq!(
+                    payload.options.apns_collapse_id.as_ref().unwrap().value,
+                    "sidepulse-led-status"
+                );
+                // Collapse is an APNs header, not an API or payload field.
+                let json = serde_json::to_value(payload).unwrap();
+                assert!(json.get("apns-collapse-id").is_none());
+            }
+        }
+    }
 
     #[test]
     fn development_prefix_selects_sandbox_and_is_removed_from_apns_payload() {
