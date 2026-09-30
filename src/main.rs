@@ -115,6 +115,12 @@ async fn listen(
     if id.len() > MAX_ID_LEN {
         return Err(StatusCode::URI_TOO_LONG);
     }
+    let id = match id.strip_prefix("apns_") {
+        Some(token) => apns::PushToken::parse(token)
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+            .channel_id(),
+        None => id,
+    };
     let guard = state.stats.connect_guard(addr.ip());
     let ch = state.channel(&id);
 
@@ -156,16 +162,27 @@ async fn post_message(
         return Err((StatusCode::URI_TOO_LONG, "ID TOO LONG".to_string()));
     }
     if let Some(token) = id.strip_prefix("apns_") {
-        state.stats.record_push(addr.ip(), token);
+        let token =
+            apns::PushToken::parse(token).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let mut msg = apns::ApnsMessage::parse(&body);
+        if token.shared_key.is_some() {
+            msg.push_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        state.stats.record_push(addr.ip(), token.routing_token);
         // Match APNs collapse behavior: recovery retains only the newest push,
         // independently of whether APNs accepts or delivers it.
-        state.channel(&id).replace_queued_push(body.clone());
+        state
+            .channel(&token.channel_id())
+            .replace_queued_push(queued_push_body(
+                &body,
+                token.shared_key,
+                msg.push_id.as_deref(),
+            ));
         let apns = state.apns.as_ref().ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "APNS NOT CONFIGURED".to_string(),
         ))?;
-        let msg = apns::ApnsMessage::parse(&body);
-        return match apns.send(token, &msg).await {
+        return match apns.send(&token, &msg).await {
             Ok(()) => Ok("OK"),
             Err(e) => Err((StatusCode::BAD_GATEWAY, format!("APNS ERROR: {e}"))),
         };
@@ -197,6 +214,30 @@ fn queued_json_value(body: String) -> serde_json::Value {
     }
 }
 
+fn queued_push_body(body: &str, shared_key: Option<&str>, push_id: Option<&str>) -> String {
+    let value = queued_json_value(body.to_string());
+    let mut object = match value {
+        serde_json::Value::Object(object) => object,
+        _ if shared_key.is_some() => {
+            let mut object = serde_json::Map::new();
+            object.insert("leds".into(), body.into());
+            object
+        }
+        _ => return body.to_string(),
+    };
+    // Sender identity comes only from the URL, including when no key is given.
+    // A JSON body must not spoof a trusted key during recovery.
+    object.remove("shared_key");
+    object.remove("sidepulse_push_id");
+    if let Some(key) = shared_key {
+        object.insert("shared_key".into(), key.into());
+    }
+    if let Some(id) = push_id {
+        object.insert("sidepulse_push_id".into(), id.into());
+    }
+    serde_json::Value::Object(object).to_string()
+}
+
 async fn get_queued(
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -204,9 +245,10 @@ async fn get_queued(
     if id.len() > MAX_ID_LEN {
         return Err(StatusCode::URI_TOO_LONG);
     }
-    if !id.starts_with("apns_") {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let token = id.strip_prefix("apns_").ok_or(StatusCode::NOT_FOUND)?;
+    let id = apns::PushToken::parse(token)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .channel_id();
 
     let messages: Vec<serde_json::Value> = state
         .channels
@@ -513,6 +555,119 @@ mod tests {
             stats: Arc::new(stats::Stats::new()),
             admin_password: None,
         })
+    }
+
+    #[tokio::test]
+    async fn keyed_pushes_share_device_recovery_and_preserve_latest_sender() {
+        let state = test_state();
+        for prefix in ["", "dev_"] {
+            let base = format!("apns_{prefix}{}", "ab".repeat(32));
+            for (key, body) in [
+                ("sender_one", "old text"),
+                ("sender-two", r#"{"leds":"latest","shared_key":"spoofed"}"#),
+            ] {
+                let result = post_message(
+                    Path(format!("{base}_{key}")),
+                    ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                    State(state.clone()),
+                    body.into(),
+                )
+                .await;
+                assert_eq!(result.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+            }
+            assert!(state.channels.contains_key(&base));
+            assert!(!state.channels.contains_key(&format!("{base}_sender_one")));
+        }
+        // A keyless app recovery URL sees the sender metadata. A suffixed URL
+        // is an alias of the same device queue, not a separate sender queue.
+        for (prefix, suffix) in [("", ""), ("dev_", "_sender_one")] {
+            let id = format!("apns_{prefix}{}{suffix}", "ab".repeat(32));
+            for expected in [
+                serde_json::json!([{"leds":"latest","shared_key":"sender-two"}]),
+                serde_json::json!([]),
+            ] {
+                let response = get_queued(Path(id.clone()), State(state.clone()))
+                    .await
+                    .unwrap();
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let mut actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                if let Some(message) = actual.get_mut(0) {
+                    let id = message
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("sidepulse_push_id")
+                        .unwrap();
+                    assert!(uuid::Uuid::parse_str(id.as_str().unwrap()).is_ok());
+                }
+                assert_eq!(actual, expected);
+            }
+        }
+        let stats = state.stats.snapshot();
+        assert_eq!(stats["today"]["unique_push_tokens"], 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_key_does_not_replace_recovery_message() {
+        let state = test_state();
+        let id = "apns_token";
+        state.channel(id).replace_queued_push("previous".into());
+        let result = post_message(
+            Path(format!("{id}_")),
+            ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+            State(state.clone()),
+            "invalid".into(),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(state.channel(id).drain_queue(), vec!["previous"]);
+        assert_eq!(
+            get_queued(Path(format!("{id}_")), State(state))
+                .await
+                .unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn recovery_sender_metadata_is_authoritative_for_json_and_plain_text() {
+        for (body, key, expected) in [
+            (
+                "plain text",
+                Some("sender"),
+                serde_json::json!({"leds":"plain text","shared_key":"sender"}),
+            ),
+            (
+                r#"{"leds":"JSON","shared_key":"spoofed","data":{"extra":1}}"#,
+                Some("sender"),
+                serde_json::json!({"leds":"JSON","shared_key":"sender","data":{"extra":1}}),
+            ),
+            (
+                r#"{"leds":"JSON","shared_key":"spoofed"}"#,
+                None,
+                serde_json::json!({"leds":"JSON"}),
+            ),
+            ("plain text", None, serde_json::json!("plain text")),
+        ] {
+            assert_eq!(
+                queued_json_value(queued_push_body(body, key, None)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_uses_the_same_bridge_message_identifier_and_overrides_body_metadata() {
+        let body = r#"{"leds":"HELLO","shared_key":"spoofed","sidepulse_push_id":"spoofed"}"#;
+        assert_eq!(
+            queued_json_value(queued_push_body(
+                body,
+                Some("sender"),
+                Some("bridge-message")
+            )),
+            serde_json::json!({"leds":"HELLO","shared_key":"sender","sidepulse_push_id":"bridge-message"})
+        );
     }
 
     #[tokio::test]

@@ -34,6 +34,9 @@ pub struct ApnsMessage {
     pub pattern: String,
     #[serde(default)]
     pub data: Option<serde_json::Value>,
+    // Set by the bridge, never accepted from the request body.
+    #[serde(skip)]
+    pub push_id: Option<String>,
 }
 
 impl ApnsMessage {
@@ -62,16 +65,54 @@ pub struct Apns {
     topic: String,
 }
 
-/// The prefix belongs to the bridge protocol, never to the APNs device token.
-fn route_token(token: &str) -> (Endpoint, &str) {
-    match token.strip_prefix("dev_") {
-        Some(token) => (Endpoint::Sandbox, token),
-        None => (Endpoint::Production, token),
+/// Bridge-only routing and sender metadata are never sent as part of Apple's
+/// device token. Split after removing dev_ so keys may themselves contain '_'.
+pub struct PushToken<'a> {
+    pub endpoint: Endpoint,
+    pub device_token: &'a str,
+    pub shared_key: Option<&'a str>,
+    pub routing_token: &'a str,
+}
+
+impl<'a> PushToken<'a> {
+    pub fn parse(token: &'a str) -> Result<Self, &'static str> {
+        let (endpoint, raw) = match token.strip_prefix("dev_") {
+            Some(raw) => (Endpoint::Sandbox, raw),
+            None => (Endpoint::Production, token),
+        };
+        let (device_token, shared_key) = match raw.split_once('_') {
+            Some((device, key)) => {
+                if key.is_empty()
+                    || key.len() > 128
+                    || !key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    return Err("INVALID SHARED KEY");
+                }
+                (device, Some(key))
+            }
+            None => (raw, None),
+        };
+        if device_token.is_empty() {
+            return Err("EMPTY APNS TOKEN");
+        }
+        let routing_len = token.len() - shared_key.map_or(0, |key| key.len() + 1);
+        Ok(Self {
+            endpoint,
+            device_token,
+            shared_key,
+            routing_token: &token[..routing_len],
+        })
+    }
+
+    pub fn channel_id(&self) -> String {
+        format!("apns_{}", self.routing_token)
     }
 }
 
 fn build_payload<'a>(
-    token: &'a str,
+    token: &PushToken<'a>,
     msg: &'a ApnsMessage,
     topic: &'a str,
 ) -> Result<a2::request::payload::Payload<'a>, String> {
@@ -114,7 +155,17 @@ fn build_payload<'a>(
         ..Default::default()
     };
 
-    let mut payload = builder.build(token, options);
+    let mut payload = builder.build(token.device_token, options);
+    if let Some(shared_key) = token.shared_key {
+        payload
+            .add_custom_data("shared_key", &shared_key)
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(push_id) = &msg.push_id {
+        payload
+            .add_custom_data("sidepulse_push_id", push_id)
+            .map_err(|e| e.to_string())?;
+    }
     let led_text = msg.led_text();
     if !led_text.is_empty() {
         payload
@@ -174,9 +225,8 @@ impl Apns {
         }))
     }
 
-    pub async fn send(&self, token: &str, msg: &ApnsMessage) -> Result<(), String> {
-        let (endpoint, token) = route_token(token);
-        let client = match endpoint {
+    pub async fn send(&self, token: &PushToken<'_>, msg: &ApnsMessage) -> Result<(), String> {
+        let client = match token.endpoint {
             Endpoint::Production => &self.production,
             Endpoint::Sandbox => &self.sandbox,
         };
@@ -206,9 +256,9 @@ mod tests {
             r#"{"leds":"ALERT","title":"Title","text":"Message"}"#,
         ] {
             let msg = ApnsMessage::parse(body);
-            for bridge_token in ["token", "dev_token"] {
-                let (_, token) = route_token(bridge_token);
-                let payload = build_payload(token, &msg, "io.sidepulse.ios").unwrap();
+            for bridge_token in ["token", "dev_token", "token_sender", "dev_token_sender"] {
+                let token = PushToken::parse(bridge_token).unwrap();
+                let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
                 assert_eq!(
                     payload.options.apns_collapse_id.as_ref().unwrap().value,
                     "sidepulse-led-status"
@@ -224,21 +274,90 @@ mod tests {
     fn development_prefix_selects_sandbox_and_is_removed_from_apns_payload() {
         let raw_token = "ab".repeat(32);
         let prefixed_token = format!("dev_{raw_token}");
-        let (endpoint, token) = route_token(&prefixed_token);
-        assert!(matches!(endpoint, Endpoint::Sandbox));
+        let token = PushToken::parse(&prefixed_token).unwrap();
+        assert!(matches!(token.endpoint, Endpoint::Sandbox));
         let msg = ApnsMessage::parse("HELLO");
-        let payload = build_payload(token, &msg, "io.sidepulse.ios").unwrap();
+        let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
         assert_eq!(payload.device_token, raw_token);
     }
 
     #[test]
     fn unprefixed_token_selects_production_and_is_preserved() {
         let raw_token = "ab".repeat(32);
-        let (endpoint, token) = route_token(&raw_token);
-        assert!(matches!(endpoint, Endpoint::Production));
+        let token = PushToken::parse(&raw_token).unwrap();
+        assert!(matches!(token.endpoint, Endpoint::Production));
         let msg = ApnsMessage::parse("HELLO");
-        let payload = build_payload(token, &msg, "io.sidepulse.ios").unwrap();
+        let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
         assert_eq!(payload.device_token, raw_token);
+    }
+
+    #[test]
+    fn shared_keys_reach_the_app_without_changing_device_or_environment() {
+        let raw_token = "ab".repeat(32);
+        for prefix in ["", "dev_"] {
+            let bridge_token = format!("{prefix}{raw_token}_sender_key-123");
+            let token = PushToken::parse(&bridge_token).unwrap();
+            assert_eq!(token.routing_token, format!("{prefix}{raw_token}"));
+            assert_eq!(token.shared_key, Some("sender_key-123"));
+            assert_eq!(
+                matches!(token.endpoint, Endpoint::Sandbox),
+                prefix == "dev_"
+            );
+            for body in [
+                "plain text",
+                r#"{"leds":"JSON","shared_key":"spoofed"}"#,
+                r#"{"title":"Alert","text":"Body","data":{"sender":"extra"}}"#,
+            ] {
+                let msg = ApnsMessage::parse(body);
+                let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
+                assert_eq!(payload.device_token, raw_token);
+                let json = serde_json::to_value(payload).unwrap();
+                assert_eq!(json["shared_key"], "sender_key-123");
+            }
+        }
+    }
+
+    #[test]
+    fn body_cannot_supply_a_shared_key_for_a_legacy_token() {
+        let token = PushToken::parse("token").unwrap();
+        let msg = ApnsMessage::parse(r#"{"leds":"HELLO","shared_key":"spoofed"}"#);
+        let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
+        assert!(serde_json::to_value(payload)
+            .unwrap()
+            .get("shared_key")
+            .is_none());
+    }
+
+    #[test]
+    fn message_identifier_is_owned_by_the_bridge() {
+        let token = PushToken::parse("token_sender").unwrap();
+        let mut msg = ApnsMessage::parse(r#"{"leds":"HELLO","sidepulse_push_id":"spoofed"}"#);
+        assert!(msg.push_id.is_none());
+        msg.push_id = Some("bridge-message".into());
+        let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
+        assert_eq!(
+            serde_json::to_value(payload).unwrap()["sidepulse_push_id"],
+            "bridge-message"
+        );
+    }
+
+    #[test]
+    fn malformed_shared_keys_and_empty_device_tokens_are_rejected() {
+        for token in [
+            "",
+            "dev_",
+            "_key",
+            "dev__key",
+            "token_",
+            "dev_token_",
+            "token_bad/key",
+            "token_bad.key",
+            "token_é",
+        ] {
+            assert!(PushToken::parse(token).is_err(), "accepted {token:?}");
+        }
+        assert!(PushToken::parse(&format!("token_{}", "a".repeat(129))).is_err());
+        assert!(PushToken::parse(&format!("token_{}", "a".repeat(128))).is_ok());
     }
 
     #[test]
@@ -250,7 +369,8 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = build_payload("token", &msg, "io.sidepulse.ios").unwrap();
+        let token = PushToken::parse("token").unwrap();
+        let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
         let json = serde_json::to_value(payload).unwrap();
 
         assert_eq!(json["aps"]["content-available"], 1);
@@ -266,7 +386,8 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = build_payload("token", &msg, "io.sidepulse.ios").unwrap();
+        let token = PushToken::parse("token").unwrap();
+        let payload = build_payload(&token, &msg, "io.sidepulse.ios").unwrap();
         let json = serde_json::to_value(payload).unwrap();
 
         assert_eq!(json["aps"]["content-available"], 1);

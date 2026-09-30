@@ -16,6 +16,7 @@ commands:
   notify <apns-token> <title> <text> [leds]
                                      send an Apple push notification
                                      prefix token with dev_ for sandbox APNs
+                                     append _<shared-key> to identify the sender
 
 environment:
   SIDEPULSE_SERVER   server base URL (default: https://bridge.sidepulse.io)
@@ -26,6 +27,7 @@ examples:
   sidepulse send "\$id" "hello world"
   echo "from stdin" | sidepulse send "\$id"
   sidepulse notify 0a1b2c... "Title" "Body text" "LED TEXT"
+  sidepulse notify 0a1b2c..._sender-key "Title" "Body text" "LED TEXT"
 EOF
   exit 1
 }

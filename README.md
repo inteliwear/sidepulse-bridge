@@ -69,8 +69,7 @@ curl -d 'hello world' https://bridge.sidepulse.io/api/leds/6f1c2a9e-8f4b-4c1d-9b
 ### Apple Push Notifications
 
 Post to a channel whose ID is `apns_` followed by the device push token.
-Instead of being queued, the message is sent as a push notification through
-APNs.
+The message is sent as a push notification through APNs and kept for recovery.
 
 ```
 POST /api/leds/apns_{device-push-token}
@@ -82,6 +81,33 @@ Development builds use `dev_` followed by the token, making their channel
 **sandbox APNs**. Both environments work on the same bridge; the `.p8` key
 must be authorized for both environments.
 
+Append `_<shared-key>` to identify a sender:
+
+```
+Production:  <hex-token>_<shared-key>
+Development: dev_<hex-token>_<shared-key>
+Push URL:    /api/leds/apns_<hex-token>_<shared-key>
+```
+
+Keys are case-sensitive, 1–128 characters from `A–Z`, `a–z`, `0–9`, `_`, and
+`-`. The bridge sends only the hex device token to Apple and includes the
+suffix as the top-level custom payload field `shared_key`. This works with
+plain TXT and JSON bodies; a body-supplied `shared_key` cannot override it.
+Tokens without a suffix remain supported and omit that payload field.
+Keyed messages include a bridge-generated `sidepulse_push_id` shared by APNs
+and recovery so the app can deduplicate activity counts.
+
+The app can issue a separate random secret key to each sender, then use the
+incoming key to identify the sender and reject LED updates with unknown,
+missing, or revoked keys. The bridge forwards this metadata; the app must
+validate it on both push and recovery paths. Anyone with the same key has
+the same sender identity. SidePulse suppresses unauthorized foreground alerts
+and removes delivered unauthorized notifications when it runs. **Update from
+Server** clears them and finishes quietly when no authorized update is needed;
+with no active keys it does not fetch. See [sender authorization and notification
+cleanup](API.md#sidepulse-sender-authorization-and-notification-cleanup) for the
+key lifecycle, counts, deduplication, and iOS background timing.
+
 The body is either plain TXT, or JSON:
 
 ```json
@@ -89,8 +115,8 @@ The body is either plain TXT, or JSON:
 ```
 
 - `leds` — the LED text, included in the push payload as custom data `leds`.
-- `title` / `text` — the notification alert title and body. With a plain TXT
-  body, the text is used as both `leds` and the alert body.
+- `title` / `text` — the notification alert title and body. A plain TXT
+  body is delivered as `leds` in a silent background push.
 
 All pushes use the fixed `apns-collapse-id: sidepulse-led-status`, so successive
 notifications for the same app/device merge into one notification automatically.
@@ -102,11 +128,17 @@ wake the app to process its custom data. Background execution remains subject
 to iOS scheduling and is not guaranteed.
 
 Responds `OK` on success, `502` with the APNs error otherwise, and
-`503 APNS NOT CONFIGURED` if the server has no APNs credentials.
+`503 APNS NOT CONFIGURED` if the server has no APNs credentials. Malformed
+key suffixes return `400 INVALID SHARED KEY` without changing the queue.
 
-Each push attempt replaces the previous message in its token's recovery queue,
+Each valid push attempt replaces the previous message in its device's recovery queue,
 whether APNs accepts it or not. Only the latest message is retained, for up to
 5 minutes. Fetching returns an array of zero or one messages and drains it:
+
+Recovery uses the device token and environment, without needing a shared key.
+All sender keys for that device share the queue. A suffixed recovery URL is an
+alias of the same queue. Keyed messages include `shared_key`; plain TXT becomes
+`{"leds":"<body>","shared_key":"<key>"}` so the app can validate it too.
 
 ```sh
 curl https://bridge.sidepulse.io/api/leds/apns_<device-token>/queued
@@ -114,7 +146,7 @@ curl https://bridge.sidepulse.io/api/leds/apns_<device-token>/queued
 
 ```sh
 curl -d '{"leds":"HELLO","title":"SidePulse","text":"New message"}' \
-  https://bridge.sidepulse.io/api/leds/apns_<device-token>
+  https://bridge.sidepulse.io/api/leds/apns_<device-token>_<shared-key>
 ```
 
 ### Health check
@@ -201,7 +233,7 @@ curl -d 'hi' localhost:8080/api/leds/test-uuid
      -v "$PWD":/src -w /src \
      -v sidepulse-cargo-registry:/usr/local/cargo/registry \
      -e CARGO_TARGET_DIR=/src/target-linux \
-     rust:1 cargo build --release
+     rust:1 cargo build --release --locked
    gcloud compute scp target-linux/release/sidepulse-bridge sidepulse-bridge:/tmp/
    ```
 
@@ -257,6 +289,9 @@ curl -d 'hi' localhost:8080/api/leds/test-uuid
    sudo systemctl enable --now sidepulse-bridge
    curl https://bridge.sidepulse.io/healthz   # → OK
    ```
+
+The [shared push key deployment record](deploy/SHARED_PUSH_KEYS.md) documents
+the installed server artifact, legacy-token compatibility checks, and rollback.
 
 ## Design notes
 

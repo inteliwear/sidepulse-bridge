@@ -18,7 +18,7 @@ self-contained: everything needed to build a client in any language is here.
   **5 minutes** — the buffer exists to cover dropped-connection recovery,
   not offline storage.
 - Channel IDs starting with `apns_` are **push-notification channels**: a POST
-  is forwarded to Apple Push Notification service instead of being buffered.
+  is forwarded to Apple Push Notification service and retained for recovery.
 
 ## Endpoints
 
@@ -68,6 +68,86 @@ prefixed with `dev_`:
 - `apns_dev_{hex_token}` routes to sandbox APNs (development builds). The
   bridge removes `dev_` before passing the device token to Apple.
 
+An optional shared key is appended after the hex token with `_`:
+
+- Production: `apns_{hex_token}_{shared_key}`
+- Development: `apns_dev_{hex_token}_{shared_key}`
+
+Keys are case-sensitive, 1–128 ASCII letters, digits, underscores, or hyphens
+(`A–Z`, `a–z`, `0–9`, `_`, `-`). An empty or malformed suffix returns
+`400 INVALID SHARED KEY` before delivery or queueing. The bridge strips both
+the environment prefix and key suffix before sending the device token to Apple.
+Legacy tokens without a key continue to work and omit `shared_key`.
+Keyed pushes also include a bridge-generated top-level `sidepulse_push_id`
+(UUID), identical in APNs and recovery copies. Apps can use it to count a
+message once across delivery paths. A body-supplied `sidepulse_push_id` cannot
+override it.
+
+The key is delivered as the top-level custom payload field `shared_key`, for
+both plain-text and JSON requests. This field is reserved: a field with that
+name in the request body cannot supply or override it. For example, posting
+`HELLO` to `apns_{hex_token}_sender-key` produces custom data:
+
+```json
+{"leds":"HELLO","shared_key":"sender-key","sidepulse_push_id":"<bridge-generated UUID>"}
+```
+
+The app should generate a random secret key for each sender, share the suffixed
+token with that sender, and match incoming `shared_key` values against its local
+list before processing LED updates. That lets it label senders and reject
+unknown, missing, or revoked keys according to its policy. Anyone holding the
+same key has the same sender identity. The bridge forwards keys; it does not
+register, authenticate, or revoke them. This requires app-side validation for
+both APNs and recovery messages.
+
+#### SidePulse sender authorization and notification cleanup
+
+The SidePulse iOS app issues a separate random key when pairing a sender or
+using **Copy New Token**. **Copy Token** on an existing key reuses it. The CLI
+stores the entire token, including `dev_` when present and the case-sensitive
+key suffix, and posts to the corresponding `apns_` channel. Re-pairing the same
+device and APNs environment replaces its saved CLI link with the new token.
+The bridge forwards the URL's key and generated message ID in both APNs and
+recovery copies; it has no list of active or removed keys.
+
+The app compares the top-level `shared_key` with its locally saved active
+keys before processing either delivery path. Nested keys do not authorize a
+push. Its behavior is:
+
+| Incoming key | App behavior |
+|---|---|
+| Matches an active key | Process the payload and record sender activity. Clear a matching LED notification after a successful write. |
+| Missing, unknown, or removed | Do not write LEDs, add an inbox entry, change link state, or record sender activity. Dismiss the notification. |
+
+Settings shows each active key's last four characters, last accepted activity
+time, and lifetime received count. Full keys stay out of the displayed list
+and are masked in payload summaries. Event IDs, or `sidepulse_push_id` when
+there is no event ID, prevent repeat callbacks and recovery from counting the
+same message twice within the latest 256 IDs retained per sender. Messages
+without an ID count on each receipt.
+
+Removing a key immediately revokes it locally and clears delivered
+notifications without an active key. A later push cannot restore or enroll
+the key; the sender must obtain a newly issued token to resume.
+
+Foreground unauthorized alerts are suppressed. Delivered unauthorized alerts
+are removed when the app handles a notification, becomes active, or runs
+**Update from Server**. iOS may show a background alert before giving the app
+execution time; server acceptance does not mean app authorization.
+
+**Update from Server** first clears unauthorized notifications. With no active
+keys it returns without a server fetch. Otherwise it recovers pending messages
+and applies the same key checks. An empty queue or rejected payload requires
+no update. The action finishes silently; setup and network failures remain in
+diagnostics instead of creating Shortcuts error alerts. A saved desktop link
+is not required. Local Shortcuts and manual LED writes do not require a remote
+sender key.
+
+Deploy the updated bridge and distribute the updated CLI together with the
+updated iOS app. The bridge still supports unkeyed requests for legacy clients,
+but the updated app rejects them. Older bridge versions do not provide the
+required key metadata.
+
 Routing is per token; the legacy `APNS_SANDBOX` / `APNS_ENV` server settings
 are ignored. Body is either plain text, or JSON:
 
@@ -95,6 +175,7 @@ Responses:
 | Status | Body                    | Meaning                              |
 |--------|-------------------------|--------------------------------------|
 | `200`  | `OK`                    | Accepted by APNs.                    |
+| `400`  | `INVALID SHARED KEY` / `EMPTY APNS TOKEN` | Malformed push token; nothing queued. |
 | `502`  | `APNS ERROR: <reason>`  | APNs rejected it (bad token, etc.).  |
 | `503`  | `APNS NOT CONFIGURED`   | Server has no APNs credentials.      |
 
@@ -103,7 +184,7 @@ notifications for the same app/device merge into one notification; no additional
 request field is needed. This does not undo LED commands already processed or
 guarantee delivery order.
 
-Every APNs post replaces the previous message in its token's recovery queue,
+Every valid APNs post replaces the previous message in its device's recovery queue,
 whether APNs accepts or rejects the delivery. The queue keeps only the latest
 message for up to 5 minutes. Ordinary SSE channels retain their five-message
 buffer.
@@ -119,8 +200,18 @@ Returns and drains the recovery queue for that token as a JSON array containing
 zero or one messages (the latest unexpired push).
 Use the same token including any `dev_` prefix as in the POST URL; production
 and development queues are separate even if their hex tokens match.
-JSON request bodies are returned as objects; plain-text bodies are returned as
-strings. A second GET returns an empty array unless new pushes have arrived.
+Shared-key suffixes are ignored when selecting the queue: the app can use
+`apns_{hex_token}/queued` (or `apns_dev_{hex_token}/queued`) to recover the latest
+message from any sender. A suffixed recovery URL drains that same queue and
+does not filter by sender. All senders share the device's latest-message slot,
+matching APNs collapse behavior.
+
+JSON request bodies are returned as objects with the URL's `shared_key` added
+when present. Keyed plain-text requests are returned as
+`{"leds":"<body>","shared_key":"<key>"}`; unkeyed plain-text requests remain
+strings. A body-supplied top-level `shared_key` is removed or replaced by the
+URL's key. Keyed objects also contain the generated `sidepulse_push_id` from
+the APNs copy. A second GET returns an empty array unless new pushes have arrived.
 
 ```json
 [
