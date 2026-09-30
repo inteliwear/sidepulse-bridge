@@ -11,7 +11,16 @@ SidePulse Pro: an 8-LED status indicator for a MacBook Pro's SD card slot.
 
 LED syntax: `#RRGGBB duration effect`, one step per line (`\n` in JSON).
 One color sets both LEDs; two set them separately. `pulse` breathes, `cosine`
-fades, `none` holds; `off` clears, `repeat` loops. Limits: 512 bytes, 20 lines.
+fades, `none` holds; `off` clears. Limits: 512 bytes, 20 lines.
+
+`repeat` loops forever; `repeat 3` plays the preceding animation three times
+total, then continues or holds the final state. `roll 2s` rotates the current
+colors one full turn in two seconds; `roll-left`/`roll-right` choose direction.
+Set colors first:
+
+    #FF00FF #00E5FF
+    roll 2s
+    repeat 3
 
 Independent timing: `index:color duration effect delay`, indexes `0`/`1`.
 Join assignments with `;` to run together, each with its own duration/delay.
