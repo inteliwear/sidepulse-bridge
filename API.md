@@ -22,6 +22,19 @@ self-contained: everything needed to build a client in any language is here.
 
 ## Endpoints
 
+### Agent instructions — `GET /agents`
+
+Response: `200`, `Content-Type: text/plain; charset=utf-8`,
+`Cache-Control: no-store`. Serves Markdown instructions as plain text so browsers can display them
+inline. The instructions cover a SidePulse Dot connected to an iPhone.
+
+Share `https://bridge.sidepulse.io/agents#apns_<copied-token>` with an agent.
+The agent must extract the complete channel ID after `#` from the original
+user-supplied link, including any environment prefix and sender-key suffix,
+then POST to `/api/leds/<channel-id>`. URL fragments are not sent in HTTP
+requests, so the returned Markdown is device-independent. This endpoint
+does not create channels, send pushes, or drain queues.
+
 ### 1. Listen — `GET /api/leds/{id}`
 
 Response: `200`, `Content-Type: text/event-stream`. Standard SSE: each message

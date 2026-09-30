@@ -34,6 +34,21 @@ cli/sidepulse notify <apns-token> "Title" "Body" "LED TEXT"
 
 ## API
 
+### Agent instructions
+
+Give an agent this link, with the complete copied token after `#`:
+
+```text
+https://bridge.sidepulse.io/agents#apns_<copied-token>
+```
+
+`GET /agents` serves Markdown instructions for controlling a SidePulse Dot
+connected to an iPhone. The agent extracts
+the channel ID from the original link and uses it in the POST URL. Preserve
+any `dev_` prefix and shared-key suffix. The fragment is not sent to the
+instructions endpoint; reading the instructions sends no update and drains
+no queue. Keep the full link private.
+
 ### Listen (SSE)
 
 ```

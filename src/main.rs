@@ -34,6 +34,16 @@ const IDLE_TTL: Duration = Duration::from_secs(300);
 /// Longest accepted channel id / apns token path segment.
 const MAX_ID_LEN: usize = 256;
 
+async fn agent_instructions() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        include_str!("agents.md"),
+    )
+}
+
 /// Queued messages exist only to bridge dropped-connection recovery: a
 /// message older than this is never delivered. Overridable for testing via
 /// QUEUE_TTL_SECS.
@@ -483,6 +493,7 @@ async fn main() {
         )
         .route("/api/leds/{id}", get(listen).post(post_message))
         .route("/api/leds/{id}/queued", get(get_queued))
+        .route("/agents", get(agent_instructions))
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .route("/healthz", get(|| async { "OK" }))
         .route("/admin", get(admin_page))
